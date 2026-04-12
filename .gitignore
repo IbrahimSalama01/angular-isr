@@ -1,0 +1,72 @@
+# Node modules
+node_modules/
+
+# Build outputs
+dist/
+build/
+lib/
+out/
+coverage/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Package managers
+.pnpm-store/
+.npm/
+.yarn/
+.yarn-cache/
+.yarnrc.yml
+
+# Optional npm cache
+.npmrc
+
+# Testing
+jest.config.js
+jest.setup.js
+
+# Temporary files
+tmp/
+temp/
+
+# Lock files (choose based on your policy)
+# Usually KEEP ONE of these, not ignore:
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# Misc
+*.tgz
+
+# Angular specific (if applicable)
+.angular/
+.angular/cache/
+
+# Storybook (if used)
+storybook-static/
+
+# ESLint cache
+.eslintcache

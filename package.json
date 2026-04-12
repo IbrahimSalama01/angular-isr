@@ -1,0 +1,56 @@
+{
+  "name": "angular-isr",
+  "version": "0.1.0",
+  "description": "Incremental Static Regeneration (ISR) for Angular SSR applications with multitenancy, CMS webhooks, and hybrid rendering",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js",
+      "require": "./dist/server.cjs"
+    },
+    "./adapters/express": {
+      "types": "./dist/adapters/express.d.ts",
+      "import": "./dist/adapters/express.js",
+      "require": "./dist/adapters/express.cjs"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "build:watch": "tsup --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "@angular/core": ">=17",
+    "@angular/platform-browser": ">=17",
+    "@angular/ssr": ">=17",
+    "express": "^4 || ^5"
+  },
+  "peerDependenciesMeta": {
+    "@angular/core": { "optional": false },
+    "@angular/platform-browser": { "optional": false },
+    "@angular/ssr": { "optional": true },
+    "express": { "optional": true }
+  },
+  "devDependencies": {
+    "@angular/core": "^21.2.0",
+    "@angular/platform-browser": "^21.2.0",
+    "@angular/ssr": "^21.2.6",
+    "@types/express": "^5.0.1",
+    "@types/node": "^20.17.19",
+    "tsup": "^8.3.5",
+    "typescript": "~5.9.2"
+  }
+}
