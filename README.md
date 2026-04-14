@@ -51,8 +51,8 @@ import { AngularNodeAppEngine, createNodeRequestHandler, isMainModule, writeResp
 import express from 'express';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { IsrEngine, MemoryCacheAdapter } from 'angular-isr/server';
-import { createIsrMiddleware, createWebhookHandler } from 'angular-isr/adapters/express';
+import { MemoryCacheAdapter } from 'angular-isr/server';
+import { createIsrEngine, createIsrMiddleware, createWebhookHandler } from 'angular-isr/adapters/express';
 
 const serverDistFolder = dirname(fileURLToPath(import.meta.url));
 const browserDistFolder = resolve(serverDistFolder, '../browser');
@@ -60,8 +60,40 @@ const browserDistFolder = resolve(serverDistFolder, '../browser');
 const app = express();
 const angularApp = new AngularNodeAppEngine();
 
-// Set up ISR engine
-const isrEngine = new IsrEngine({
+// Angular SSR request handler (AngularNodeAppEngine - Angular 19+)
+const angularHandler = createNodeRequestHandler(async (req, res, next) => {
+  const response = await angularApp.handle(req);
+  if (response) {
+    writeResponseToNodeResponse(response, res);
+  } else {
+    next();
+  }
+});
+
+/**
+ * OR: Angular 17/18 CommonEngine approach
+ *
+ * import { CommonEngine } from '@angular/ssr';
+ * const commonEngine = new CommonEngine();
+ *
+ * const angularHandler: RequestHandler = (req, res, next) => {
+ *   commonEngine
+ *     .render({
+ *       bootstrap: AppServerModule,
+ *       documentFilePath: join(serverDistFolder, 'index.server.html'),
+ *       url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+ *       publicPath: browserDistFolder,
+ *       providers: [{ provide: APP_BASE_HREF, useValue: req.baseUrl }],
+ *     })
+ *     .then((html) => res.send(html))
+ *     .catch((err) => next(err));
+ * };
+ */
+
+// Set up ISR engine — createIsrEngine() auto-wires background revalidation
+// using the same angularHandler, so you don't need to configure renderFnFactory manually.
+const isrEngine = createIsrEngine({
+  angularHandler,
   cache: new MemoryCacheAdapter(),
   cacheVersion: process.env['APP_VERSION'] ?? '1',
   routes: [
@@ -81,7 +113,7 @@ app.post(
   '/_isr/revalidate',
   express.json(),
   createWebhookHandler({
-    cacheAdapter: isrEngine['config'].cache,
+    engine: isrEngine,
     secret: process.env['ISR_SECRET'] ?? 'change-me',
     onEvent: (event) => console.log('[ISR webhook]', event.meta),
   }),
@@ -90,17 +122,7 @@ app.post(
 // Static files
 app.use(express.static(browserDistFolder, { maxAge: '1y', index: false, redirect: false }));
 
-// Angular SSR request handler
-const angularHandler = createNodeRequestHandler(async (req, res, next) => {
-  const response = await angularApp.handle(req);
-  if (response) {
-    writeResponseToNodeResponse(response, res);
-  } else {
-    next();
-  }
-});
-
-// ISR middleware — intercepts all other requests
+// ISR middleware — intercepts all HTML page requests
 app.use(createIsrMiddleware({ engine: isrEngine, angularHandler }));
 
 if (isMainModule(import.meta.url)) {
@@ -111,6 +133,9 @@ if (isMainModule(import.meta.url)) {
 export const reqHandler = createNodeRequestHandler(app);
 ```
 
+> **Why `createIsrEngine()` instead of `new IsrEngine()`?**  
+> `createIsrEngine()` is a factory helper that automatically configures `renderFnFactory` for background revalidation using your `angularHandler`. Without it, stale pages will be served indefinitely because background re-renders won't have access to the Angular render pipeline.
+
 ### 2. Angular — `src/app/app.config.ts`
 
 ```typescript
@@ -120,12 +145,30 @@ export const appConfig: ApplicationConfig = {
   providers: [
     provideRouter(routes),
     provideClientHydration(withEventReplay()),
-    provideIsr(),
+    provideIsr(), // Shared providers (client + server)
   ],
 };
 ```
 
-### 3. Read ISR state in a component
+### 3. Angular Server — `src/app/app.config.server.ts`
+
+```typescript
+import { mergeApplicationConfig, ApplicationConfig } from '@angular/core';
+import { provideServerRendering } from '@angular/platform-server';
+import { provideIsrServer } from 'angular-isr/server';
+import { appConfig } from './app.config';
+
+const serverConfig: ApplicationConfig = {
+  providers: [
+    provideServerRendering(),
+    provideIsrServer(), // Required for ISR-aware fetching (AsyncLocalStorage)
+  ],
+};
+
+export const config = mergeApplicationConfig(appConfig, serverConfig);
+```
+
+### 4. Read ISR state in a component
 
 ```typescript
 import { Component, inject } from '@angular/core';
@@ -211,27 +254,46 @@ routes: [
 
 ---
 
-## isr.fetch — Hybrid/Partial Rendering
+## Production Deployment
+
+### MemoryCacheAdapter vs Redis
+
+The built-in `MemoryCacheAdapter` is suitable for local development and single-instance deployments. However, in a production environment with multiple server instances (load-balanced), each instance will have its own isolated memory cache.
+
+For multi-instance deployments, you **must** use a distributed cache like **Redis**. This ensures that all instances share the same cache state and that a webhook-triggered invalidation affects all instances simultaneously.
+
+See the [Custom Cache Adapter](#custom-cache-adapter) section for a Redis implementation example.
+
+---
+
+## Hybrid Rendering with isr.fetch()
 
 The biggest differentiator: data-level cache control during SSR.
 
-Pass `isrFetch` to your Angular services via a `REQUEST` token or custom provider, then use it instead of native `fetch()`:
+Instead of using the native `fetch()`, inject the `ISR_FETCH` token. This allows the ISR engine to track data dependencies and automatically handle hydration.
+
+### 1. In your Angular service
 
 ```typescript
-// In your Angular data service (server-side)
+import { inject, Injectable } from '@angular/core';
+import { ISR_FETCH } from 'angular-isr';
+
 @Injectable({ providedIn: 'root' })
 export class BlogService {
-  async getPosts(isrFetch: IsrFetchFn): Promise<Post[]> {
+  private fetch = inject(ISR_FETCH);
+
+  async getPosts() {
     // This response IS included in the ISR cache (default behavior)
-    const response = await isrFetch('https://cms.example.com/api/posts', {
+    // It will be cached for 300s and tagged with 'blog'
+    const response = await this.fetch('https://cms.example.com/api/posts', {
       isr: { cache: true, ttl: 300, tags: ['blog'] },
     });
     return response.json();
   }
 
-  async getCart(isrFetch: IsrFetchFn): Promise<Cart> {
+  async getCart() {
     // This response is NEVER cached — fetched live on every request
-    const response = await isrFetch('/api/user/cart', {
+    const response = await this.fetch('/api/user/cart', {
       isr: { cache: false },
     });
     return response.json();
@@ -239,29 +301,16 @@ export class BlogService {
 }
 ```
 
-- `cache: true` (default) — response serialized into ISR `CacheEntry`, hydrated on client
-- `cache: false` — fetched live on every request, not included in cached HTML
+- `cache: true` (default) — response serialized into ISR `CacheEntry`, hydrated on client.
+- `cache: false` — fetched live on every request, not included in cached HTML.
 
 ---
 
-## CMS Webhooks
+## CMS Integration
 
-### Generic webhook
+Connecting your CMS to `angular-isr` allows for instant updates when content changes.
 
-```bash
-curl -X POST https://your-site.com/_isr/revalidate \
-  -H "Content-Type: application/json" \
-  -H "X-ISR-Secret: your-secret" \
-  -H "X-Idempotency-Key: unique-event-id" \
-  -d '{ "paths": ["/blog/my-post"], "tags": ["blog"], "tenant": "tenant-a" }'
-```
-
-Response:
-```json
-{ "message": "Revalidation scheduled", "paths": ["/blog/my-post"], "tags": ["blog"] }
-```
-
-### Contentful
+### 1. Setup CMS Adapter
 
 ```typescript
 import { ContentfulIsrAdapter } from 'angular-isr/server';
@@ -277,12 +326,44 @@ const adapter = new ContentfulIsrAdapter({
     return slug ? `/blog/${slug}` : undefined;
   },
 });
+```
 
-// In your webhook route:
+### 2. Connect to Engine
+
+Use `engine.invalidate()` to purge the cache when a webhook is received.
+
+```typescript
 app.post('/webhooks/contentful', express.json(), async (req, res) => {
-  const payload = await adapter.parseWebhook(req);
-  // Forward to ISR webhook handler or call cacheAdapter.deleteByTag directly
+  try {
+    const payload = await adapter.parseWebhook(req);
+    
+    // Invalidate the paths and tags returned by the adapter
+    await isrEngine.invalidate({
+      tenantId: '', // optional tenant
+      paths: payload.paths,
+      tags: payload.tags,
+    });
+    
+    res.status(200).json({ message: 'Invalidated' });
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid secret' });
+  }
 });
+```
+
+We also support [Sanity](#sanity) and [Strapi](#strapi) out of the box.
+
+---
+
+## CMS Webhooks (Generic)
+
+If you aren't using a built-in adapter, you can call our generic webhook handler:
+
+```bash
+curl -X POST https://your-site.com/_isr/revalidate \
+  -H "Content-Type: application/json" \
+  -H "X-ISR-Secret: your-secret" \
+  -d '{ "paths": ["/blog/my-post"], "tags": ["blog"] }'
 ```
 
 ### Sanity
@@ -473,9 +554,35 @@ revalidation: {
 
 | Import | Use case |
 |--------|----------|
-| `angular-isr` | Angular components, app config (`provideIsr`, `IsrService`, `ISR_ROUTE_CONFIG`) |
-| `angular-isr/server` | Server-side only: `IsrEngine`, cache adapters, CMS adapters, queue adapters |
-| `angular-isr/adapters/express` | Express-specific: `createIsrMiddleware`, `createWebhookHandler` |
+| `angular-isr` | Angular components, app config (`provideIsr`, `IsrService`, `ISR_FETCH`, `withIsrConfig`) |
+| `angular-isr/server` | Server-side only: `IsrEngine`, `provideIsrServer`, cache adapters, CMS adapters, queue adapters |
+| `angular-isr/adapters/express` | Express-specific: `createIsrEngine`, `createIsrMiddleware`, `createWebhookHandler` |
+
+---
+
+## API Reference
+
+### Angular (@angular-isr)
+
+- `provideIsr(config?)`: Provides ISR services to your Angular app.
+- `IsrService`: Injectable service that exposes `cacheState()`, `ttl()`, and `tags()` signals.
+- `ISR_FETCH`: Injection token for an ISR-aware fetch function.
+- `withIsrConfig(config)`: Helper to set ISR configuration in route data.
+  ```ts
+  { path: 'home', component: HomeComponent, data: withIsrConfig({ ttl: 3600 }) }
+  ```
+
+### Server (@angular-isr/server)
+
+- `IsrEngine`: The core ISR engine.
+- `MemoryCacheAdapter`: In-memory cache storage (single-instance only).
+- `IsrEngine.invalidate({ tenantId, paths, tags })`: Programmatically invalidate cache entries.
+
+### Express (`angular-isr/adapters/express`)
+
+- `createIsrEngine(options)`: **Recommended** — creates an `IsrEngine` pre-wired for Express. Accepts the same options as `IsrEngine` plus `angularHandler`, and automatically configures background revalidation using that handler. Use instead of `new IsrEngine()` in Express apps.
+- `createIsrMiddleware({ engine, angularHandler })`: Creates Express middleware that intercepts HTML page requests through the ISR pipeline.
+- `createWebhookHandler({ engine, secret, ... })`: Handles on-demand revalidation webhooks. Always pass `engine` (not the deprecated `cacheAdapter`) for correct cache-key-based invalidation.
 
 ---
 
