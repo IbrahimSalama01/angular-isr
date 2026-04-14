@@ -10,7 +10,7 @@ export interface IsrMiddlewareOptions {
    * The Angular SSR request handler (from AngularNodeAppEngine or similar).
    * Called to render a page when the cache is cold.
    */
-  angularHandler: RequestHandler;
+  angularHandler: RequestHandler | (() => Promise<void>);
 }
 
 /**
@@ -71,7 +71,7 @@ function sendCachedResponse(res: Response, html: string, routeConfig?: IsrRouteC
  * anywhere in the Angular DI tree during SSR (via inject(ISR_FETCH)).
  */
 function createRenderFn(
-  angularHandler: RequestHandler,
+  angularHandler: RequestHandler | (() => Promise<void>),
   originalReq: Request,
 ): (isrFetch: IsrFetchFn) => Promise<string> {
   return (isrFetch: IsrFetchFn): Promise<string> => {
@@ -87,8 +87,9 @@ function createRenderFn(
           );
           rejectHtml(error);
         });
-        if (result instanceof Promise) {
-          result.catch((err) => rejectHtml(err instanceof Error ? err : new Error(String(err))));
+        const promiseResult = result as unknown as Promise<void> | undefined;
+        if (promiseResult) {
+          promiseResult.catch((err) => rejectHtml(err instanceof Error ? err : new Error(String(err))));
         }
       } catch (error) {
         rejectHtml(error instanceof Error ? error : new Error(String(error)));

@@ -58,8 +58,9 @@ export function createIsrEngine(options: IsrEngineFactoryOptions): IsrEngine {
                     if (err) reject(err instanceof Error ? err : new Error(String(err)));
                     else reject(new Error('Angular handler passed to next() — no response captured'));
                   });
-                  if (result instanceof Promise) {
-                    result.catch(reject);
+                  const promiseResult = result as unknown as Promise<void> | undefined;
+                  if (promiseResult) {
+                    promiseResult.catch(reject);
                   }
                 } catch (error) {
                   reject(error);
