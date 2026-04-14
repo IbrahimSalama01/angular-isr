@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import type { CmsAdapter, WebhookPayload } from '../types.js';
 
 export interface ContentfulAdapterOptions {
@@ -47,7 +48,13 @@ export class ContentfulIsrAdapter implements CmsAdapter {
 
     // Verify secret
     const providedSecret = request.headers['x-contentful-webhook-secret'];
-    if (!providedSecret || providedSecret !== this.options.secret) {
+    if (!providedSecret) {
+      throw new Error('Missing Contentful webhook secret header');
+    }
+    // Use timing-safe comparison to prevent timing attacks
+    const a = Buffer.from(providedSecret);
+    const b = Buffer.from(this.options.secret);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
       throw new Error('Invalid Contentful webhook secret');
     }
 

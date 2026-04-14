@@ -38,7 +38,11 @@ export class MemoryQueueAdapter implements RevalidationQueueAdapter {
     this.inFlight.add(job.cacheKey);
     const fullJob: RevalidationJob = { ...job, attempt: 1, enqueuedAt: Date.now() };
     // Fire and forget — process in background
-    this.processWithRetry(fullJob).catch(() => {/* handled in processWithRetry */});
+    this.processWithRetry(fullJob).catch((err) => {
+      // This should never happen — processWithRetry handles its own errors internally.
+      // If we reach here, there is a bug in processWithRetry itself.
+      console.error('[angular-isr] Unexpected error in processWithRetry — this is a bug:', err);
+    });
   }
 
   private async processWithRetry(job: RevalidationJob): Promise<void> {

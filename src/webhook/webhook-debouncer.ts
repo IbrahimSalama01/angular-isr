@@ -21,10 +21,14 @@ export class WebhookDebouncer {
   /**
    * Adds a payload to the pending batch and schedules a flush.
    * Resets the timer if called again within the window.
+   * 
+   * When payloads for multiple tenants arrive within the debounce window,
+   * the merged payload's `tenant` field is set to `'__all__'` as a sentinel
+   * value. Callers should treat this as "invalidate all tenants."
    */
   debounce(payload: WebhookPayload, onFlush: (merged: WebhookPayload) => void): void {
-    payload.paths?.forEach((p) => this.pendingPaths.add(p));
-    payload.tags?.forEach((t) => this.pendingTags.add(t));
+    if (payload.paths) payload.paths.forEach((p) => this.pendingPaths.add(p));
+    if (payload.tags) payload.tags.forEach((t) => this.pendingTags.add(t));
     if (payload.tenant) this.pendingTenants.add(payload.tenant);
 
     if (this.timer) clearTimeout(this.timer);
@@ -33,7 +37,11 @@ export class WebhookDebouncer {
       const merged: WebhookPayload = {
         paths: this.pendingPaths.size > 0 ? [...this.pendingPaths] : undefined,
         tags: this.pendingTags.size > 0 ? [...this.pendingTags] : undefined,
-        tenant: this.pendingTenants.size === 1 ? [...this.pendingTenants][0] : undefined,
+        tenant: this.pendingTenants.size === 0
+          ? undefined
+          : this.pendingTenants.size === 1
+            ? [...this.pendingTenants][0]
+            : '__all__', // Sentinel: caller should invalidate across all tenants
       };
 
       this.pendingPaths.clear();
@@ -55,7 +63,11 @@ export class WebhookDebouncer {
     const merged: WebhookPayload = {
       paths: this.pendingPaths.size > 0 ? [...this.pendingPaths] : undefined,
       tags: this.pendingTags.size > 0 ? [...this.pendingTags] : undefined,
-      tenant: this.pendingTenants.size === 1 ? [...this.pendingTenants][0] : undefined,
+      tenant: this.pendingTenants.size === 0
+        ? undefined
+        : this.pendingTenants.size === 1
+          ? [...this.pendingTenants][0]
+          : '__all__', // Sentinel: caller should invalidate across all tenants
     };
 
     this.pendingPaths.clear();
