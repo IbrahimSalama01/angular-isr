@@ -38,8 +38,12 @@ export class IsrEngine {
 
   /**
    * Handles an incoming request through the ISR pipeline.
+   *
+   * @param req - The framework request object
+   * @param path - The URL path to handle
+   * @param renderFn - Optional function to render the page (required for cache misses)
    */
-  async handle(req: unknown, path: string): Promise<IsrHandleResult> {
+  async handle(req: unknown, path: string, renderFn?: (isrFetch: IsrFetchFn) => Promise<string>): Promise<IsrHandleResult> {
     const startTime = Date.now();
 
     const tenantId = await this.resolveTenant(req);
@@ -47,18 +51,12 @@ export class IsrEngine {
     const cacheKey = this.buildCacheKey(req, tenantId, normalizedPath);
     const routeConfig = this.matchRoute(normalizedPath);
 
-    const ctx: IsrRequestContext = {
-      path: normalizedPath,
-      tenantId,
-      renderFn: (isrFetch) => this.config.cache.get(cacheKey).then(() => ''), // placeholder
-    };
-
     const cached = await this.config.cache.get(cacheKey);
 
     if (cached) {
       // Version check
       if (cached.version !== this.cacheVersion) {
-        return this.handleMiss(req, tenantId, normalizedPath, cacheKey, routeConfig, startTime);
+        return this.handleMiss(req, tenantId, normalizedPath, cacheKey, routeConfig, startTime, renderFn);
       }
 
       if (cached.state === 'fresh') {
@@ -85,7 +83,7 @@ export class IsrEngine {
       }
     }
 
-    return this.handleMiss(req, tenantId, normalizedPath, cacheKey, routeConfig, startTime);
+    return this.handleMiss(req, tenantId, normalizedPath, cacheKey, routeConfig, startTime, renderFn);
   }
 
   /**
@@ -148,6 +146,7 @@ export class IsrEngine {
     cacheKey: string,
     routeConfig: IsrRouteConfig | undefined,
     startTime: number,
+    renderFn?: (isrFetch: IsrFetchFn) => Promise<string>,
   ): Promise<IsrHandleResult> {
     this.emit({ type: 'miss', tenantId, path, durationMs: Date.now() - startTime });
 
@@ -163,7 +162,10 @@ export class IsrEngine {
 
     // We own the render
     try {
-      const html = await this.render(req, tenantId, path, cacheKey, routeConfig);
+      if (!renderFn) {
+        throw new Error('renderFn is required for cache misses. Provide it via engine.handle(req, path, renderFn).');
+      }
+      const html = await this.render(req, tenantId, path, cacheKey, routeConfig, renderFn);
       return { html, state: 'fresh', cacheHeaders: routeConfig?.cacheHeaders };
     } finally {
       if (lockResult.acquired) {
@@ -176,16 +178,11 @@ export class IsrEngine {
     _req: unknown,
     tenantId: string,
     path: string,
-    cacheKey: string,
+    _cacheKey: string,
     routeConfig: IsrRouteConfig | undefined,
+    renderFn: (isrFetch: IsrFetchFn) => Promise<string>,
   ): Promise<string> {
-    const cachedResponses = new Map<string, unknown>();
-    const isrFetch = this.createIsrFetch(cachedResponses);
-
-    // The actual renderFn is provided by the adapter (e.g. Express middleware)
-    // and set on the engine via setRenderFn. For now, the adapter calls render directly.
-    // This is a placeholder — adapters call engine.renderForRequest() instead.
-    throw new Error('renderFn must be provided via IsrEngine.renderForRequest()');
+    return this.renderForRequest(tenantId, path, renderFn, routeConfig);
   }
 
   /**
@@ -220,23 +217,25 @@ export class IsrEngine {
   }
 
   private scheduleRevalidation(
-    req: unknown,
+    _req: unknown,
     tenantId: string,
     path: string,
-    cacheKey: string,
-    routeConfig: IsrRouteConfig | undefined,
-    staleEntry: CacheEntry,
+    _cacheKey: string,
+    _routeConfig: IsrRouteConfig | undefined,
+    _staleEntry: CacheEntry,
   ): void {
-    if (this.renderLock.isLocked(cacheKey)) return;
+    // Note: Revalidation requires a renderFnFactory to be configured
+    // Without it, stale content will be served but not refreshed in the background
+    if (!this.config.revalidation?.renderFnFactory) {
+      this.emit({ type: 'error', tenantId, path, error: new Error('renderFnFactory not configured - background revalidation disabled') });
+      return;
+    }
 
     const job: Omit<RevalidationJob, 'attempt' | 'enqueuedAt'> = {
-      cacheKey,
+      cacheKey: this.buildCacheKey(null, tenantId, path),
       tenantId,
       path,
-      renderFn: async () => {
-        // renderFn for the queue will be set by the adapter
-        return staleEntry.html;
-      },
+      renderFn: this.config.revalidation.renderFnFactory(tenantId, path),
     };
 
     this.queue.enqueue(job);
@@ -245,7 +244,8 @@ export class IsrEngine {
   private async processRevalidation(job: RevalidationJob): Promise<void> {
     this.emit({ type: 'revalidate', tenantId: job.tenantId, path: job.path, meta: { attempt: job.attempt } });
     try {
-      await job.renderFn();
+      const routeConfig = this.matchRoute(job.path);
+      await this.renderForRequest(job.tenantId, job.path, job.renderFn, routeConfig);
     } catch (error) {
       this.emit({ type: 'error', tenantId: job.tenantId, path: job.path, error: error instanceof Error ? error : new Error(String(error)) });
       throw error;
@@ -270,7 +270,8 @@ export class IsrEngine {
 
   matchRoute(path: string): IsrRouteConfig | undefined {
     if (!this.config.routes?.length) return undefined;
-    return this.config.routes.find((r) => matchPath(r.path, path));
+    const normalizedPath = normalizePath(path);
+    return this.config.routes.find((r) => matchPath(normalizePath(r.path), normalizedPath));
   }
 
   private emit(event: IsrEvent): void {
@@ -287,7 +288,8 @@ export class IsrEngine {
  * Supports exact paths and ** wildcards.
  */
 function matchPath(pattern: string, path: string): boolean {
-  if (pattern === '**') return true;
+  // Pattern and path are expected to be normalized with normalizePath()
+  if (pattern === '**' || pattern === '/**') return true;
   if (pattern === path) return true;
 
   // Convert glob to regex: ** matches anything, * matches path segment

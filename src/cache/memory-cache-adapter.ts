@@ -26,8 +26,8 @@ export class MemoryCacheAdapter implements CacheAdapter {
 
     const { entry } = stored;
 
-    // Version mismatch → treat as miss
-    if (entry.version !== stored.entry.version) return null;
+    // Note: Version mismatch is handled by IsrEngine, not the adapter
+    // This allows the adapter to remain framework-agnostic
 
     if (entry.state === 'error') return entry;
     if (entry.state === 'revalidating') return entry;

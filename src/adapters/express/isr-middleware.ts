@@ -28,45 +28,18 @@ export function createIsrMiddleware(options: IsrMiddlewareOptions): RequestHandl
     const path = req.path;
 
     try {
-      const routeConfig = engine.matchRoute(path);
-      const tenantId = await resolveTenant(engine, req);
-      const cacheKey = engine.buildCacheKey(req, tenantId, path);
+      // Create render function for the engine
+      const renderFn = createRenderFn(angularHandler, req);
 
-      // Check cache first via the engine's full handle flow
-      const cached = await engine['config'].cache.get(cacheKey);
+      // Let the engine handle the full ISR pipeline
+      const result = await engine.handle(req, path, renderFn);
 
-      if (cached && cached.version === (engine['cacheVersion'] ?? '0')) {
-        if (cached.state === 'fresh' || cached.state === 'revalidating') {
-          sendCachedResponse(res, cached.html, routeConfig);
-          return;
-        }
-
-        if (cached.state === 'stale') {
-          // Serve stale immediately
-          sendCachedResponse(res, cached.html, routeConfig);
-          // Schedule background revalidation
-          scheduleBackground(engine, req, tenantId, path, cacheKey, routeConfig, cached.html, angularHandler);
-          return;
-        }
-      }
-
-      // Cache miss or version mismatch — render synchronously
-      const html = await renderAndCache(engine, req, tenantId, path, cacheKey, routeConfig, angularHandler);
-      sendCachedResponse(res, html, routeConfig);
+      // Send the response
+      sendCachedResponse(res, result.html, engine.matchRoute(path));
     } catch (error) {
       next(error);
     }
   };
-}
-
-async function resolveTenant(engine: IsrEngine, req: Request): Promise<string> {
-  const resolver = engine['config'].tenantResolver;
-  if (!resolver) return '';
-  try {
-    return await resolver(req);
-  } catch {
-    return '';
-  }
 }
 
 function sendCachedResponse(res: Response, html: string, routeConfig?: IsrRouteConfig): void {
@@ -75,34 +48,6 @@ function sendCachedResponse(res: Response, html: string, routeConfig?: IsrRouteC
   }
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.end(html);
-}
-
-async function renderAndCache(
-  engine: IsrEngine,
-  req: Request,
-  tenantId: string,
-  path: string,
-  _cacheKey: string,
-  routeConfig: IsrRouteConfig | undefined,
-  angularHandler: RequestHandler,
-): Promise<string> {
-  const renderFn = createRenderFn(angularHandler, req);
-  return engine.renderForRequest(tenantId, path, renderFn, routeConfig);
-}
-
-function scheduleBackground(
-  engine: IsrEngine,
-  req: Request,
-  tenantId: string,
-  path: string,
-  _cacheKey: string,
-  routeConfig: IsrRouteConfig | undefined,
-  _staleHtml: string,
-  angularHandler: RequestHandler,
-): void {
-  const renderFn = createRenderFn(angularHandler, req);
-  // Fire and forget
-  engine.renderForRequest(tenantId, path, renderFn, routeConfig).catch(() => {/* logged by engine */});
 }
 
 /**
@@ -119,16 +64,22 @@ function createRenderFn(
       const headers: Record<string, string> = {};
 
       // Create a mock response to capture Angular's output
-      const mockRes = {
+      const mockRes: any = {
         statusCode: 200,
+        status(code: number) {
+          this.statusCode = code;
+          return this;
+        },
         setHeader(name: string, value: string) {
           headers[name.toLowerCase()] = value;
+          return this;
         },
         getHeader(name: string) {
           return headers[name.toLowerCase()];
         },
         removeHeader(name: string) {
           delete headers[name.toLowerCase()];
+          return this;
         },
         write(chunk: Buffer | string) {
           if (typeof chunk === 'string') {
@@ -147,14 +98,33 @@ function createRenderFn(
             }
           }
           resolve(Buffer.concat(chunks).toString('utf8'));
+          return this;
+        },
+        send(body: any) {
+          if (typeof body === 'string') {
+            this.write(body);
+          } else if (Buffer.isBuffer(body)) {
+            this.write(body);
+          } else {
+            this.json(body);
+            return this;
+          }
+          this.end();
+          return this;
+        },
+        json(obj: any) {
+          this.setHeader('Content-Type', 'application/json');
+          this.write(JSON.stringify(obj));
+          this.end();
+          return this;
         },
         on() { return this; },
         once() { return this; },
         emit() { return false; },
-      } as unknown as Response;
+      };
 
       try {
-        const result = angularHandler(originalReq, mockRes, (err?: unknown) => {
+        const result = angularHandler(originalReq, mockRes as Response, (err?: unknown) => {
           if (err) reject(err instanceof Error ? err : new Error(String(err)));
           else reject(new Error('Angular handler passed to next() — no response captured'));
         });

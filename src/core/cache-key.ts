@@ -16,11 +16,23 @@ export function defaultCacheKeyResolver(
 
 /**
  * Normalizes a URL path for consistent cache key generation.
- * Strips query strings and trailing slashes (except root '/').
+ * Ensures a leading slash and strips query strings, fragments, and trailing slashes.
  */
 export function normalizePath(path: string): string {
+  if (!path) return '/';
+  
   // Strip query string and fragment
-  const clean = path.split('?')[0].split('#')[0];
+  let clean = path.split('?')[0].split('#')[0];
+  
+  // Ensure leading slash
+  if (!clean.startsWith('/')) {
+    clean = '/' + clean;
+  }
+  
   // Remove trailing slash unless it's the root
-  return clean.length > 1 && clean.endsWith('/') ? clean.slice(0, -1) : clean;
+  if (clean.length > 1 && clean.endsWith('/')) {
+    clean = clean.slice(0, -1);
+  }
+  
+  return clean;
 }

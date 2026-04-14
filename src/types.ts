@@ -49,7 +49,7 @@ export interface RevalidationJob {
   cacheKey: string;
   tenantId: string;
   path: string;
-  renderFn: () => Promise<string>;
+  renderFn: (isrFetch: IsrFetchFn) => Promise<string>;
   attempt: number;
   enqueuedAt: number;
 }
@@ -224,6 +224,12 @@ export interface IsrEngineConfig {
     rateLimitPerMinute?: number;
     /** Debounce window in ms to batch rapid CMS invalidations. Default: 500 */
     debounceMs?: number;
+    /**
+     * Factory function to create a render function for background revalidation jobs.
+     * The engine will call this to get a render function when processing queued revalidation jobs.
+     * This allows the adapter to provide framework-specific rendering logic.
+     */
+    renderFnFactory?: (tenantId: string, path: string) => (isrFetch: IsrFetchFn) => Promise<string>;
   };
   onEvent?: IsrEventHandler;
 }
