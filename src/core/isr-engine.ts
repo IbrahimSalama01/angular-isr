@@ -12,7 +12,9 @@ import type {
   IsrRequestContext,
   IsrRouteConfig,
   RevalidationJob,
+  IsrTransferState,
 } from '../types.js';
+import { ANGULAR_ISR_TRANSFER_KEY } from '../types.js';
 
 /**
  * The core framework-agnostic ISR engine.
@@ -51,6 +53,17 @@ export class IsrEngine {
     const cacheKey = this.buildCacheKey(req, tenantId, normalizedPath);
     const routeConfig = this.matchRoute(normalizedPath);
 
+    // No ISR config for this route — pass through to Angular SSR without caching
+    if (!routeConfig) {
+      if (!renderFn) {
+        throw new Error('renderFn is required for unconfigured routes. Provide it via engine.handle(req, path, renderFn).');
+      }
+      const isrFetch = this.createIsrFetch(new Map());
+      const html = await renderFn(isrFetch);
+      this.emit({ type: 'miss', tenantId, path: normalizedPath, durationMs: Date.now() - startTime });
+      return { html, state: 'miss' };
+    }
+
     const cached = await this.config.cache.get(cacheKey);
 
     if (cached) {
@@ -73,7 +86,7 @@ export class IsrEngine {
       if (cached.state === 'stale') {
         // Serve stale immediately and trigger background revalidation
         this.emit({ type: 'revalidate', tenantId, path: normalizedPath, cacheState: 'stale', durationMs: Date.now() - startTime });
-        this.scheduleRevalidation(req, tenantId, normalizedPath, cacheKey, routeConfig, cached);
+        void this.scheduleRevalidation(req, tenantId, normalizedPath, cacheKey, routeConfig, cached);
         return { html: cached.html, state: 'stale', cacheHeaders: routeConfig?.cacheHeaders };
       }
 
@@ -88,6 +101,7 @@ export class IsrEngine {
 
   /**
    * Invalidates cache entries by paths and/or tags for a specific tenant.
+   * If tenantId is '__all__', invalidation applies to all tenants.
    */
   async invalidate(options: {
     tenantId: string;
@@ -96,6 +110,43 @@ export class IsrEngine {
   }): Promise<string[]> {
     const { tenantId, paths = [], tags = [] } = options;
     const invalidated: string[] = [];
+
+    if (tenantId === '__all__') {
+      // Global invalidation across all tenants.
+      // Relies on deleteByPath/deleteByTag/deleteByTenant supporting '__all__' as a wildcard —
+      // MemoryCacheAdapter does; custom adapters must implement it too.
+      for (const path of paths) {
+        if (this.config.cache.deleteByPath) {
+          const keys = await this.config.cache.deleteByPath('__all__', normalizePath(path));
+          invalidated.push(...keys);
+        } else {
+          // Custom adapter doesn't implement optional deleteByPath — global path invalidation
+          // cannot be performed. Emit an error event so this silent skip is observable.
+          this.emit({
+            type: 'error',
+            tenantId: '__all__',
+            path,
+            error: new Error(
+              `Cache adapter does not implement deleteByPath — path "${path}" was NOT globally invalidated. ` +
+              `Add deleteByPath() to your CacheAdapter or use tag-based invalidation instead.`,
+            ),
+          });
+        }
+      }
+
+      for (const tag of tags) {
+        const keys = await this.config.cache.deleteByTag('__all__', tag);
+        invalidated.push(...keys);
+      }
+
+      // If no paths/tags but tenantId is '__all__', clear everything
+      if (paths.length === 0 && tags.length === 0) {
+        const keys = await this.config.cache.deleteByTenant('__all__');
+        invalidated.push(...keys);
+      }
+
+      return invalidated;
+    }
 
     for (const path of paths) {
       const key = this.buildCacheKey(null, tenantId, normalizePath(path));
@@ -197,11 +248,21 @@ export class IsrEngine {
     const cachedResponses = new Map<string, unknown>();
     const isrFetch = this.createIsrFetch(cachedResponses);
 
-    const html = await renderFn(isrFetch);
+    const rawHtml = await renderFn(isrFetch);
+
+    // Build and inject ISR metadata for Angular client-side IsrService
+    const isrState: IsrTransferState = {
+      cacheState: 'fresh',
+      ttl: routeConfig?.ttl ?? null,
+      tenant: tenantId || null,
+      tags: routeConfig?.tags ?? [],
+    };
+    const html = this.injectIsrTransferState(rawHtml, isrState);
+
     const cacheKey = this.buildCacheKey(null, tenantId, normalizePath(path));
 
     const entry: CacheEntry = {
-      html,
+      html, // store html (with injected state), not rawHtml
       state: 'fresh',
       createdAt: Date.now(),
       ttl: routeConfig?.ttl,
@@ -216,14 +277,14 @@ export class IsrEngine {
     return html;
   }
 
-  private scheduleRevalidation(
+  private async scheduleRevalidation(
     _req: unknown,
     tenantId: string,
     path: string,
-    _cacheKey: string,
+    cacheKey: string,
     _routeConfig: IsrRouteConfig | undefined,
-    _staleEntry: CacheEntry,
-  ): void {
+    staleEntry: CacheEntry,
+  ): Promise<void> {
     // Note: Revalidation requires a renderFnFactory to be configured
     // Without it, stale content will be served but not refreshed in the background
     if (!this.config.revalidation?.renderFnFactory) {
@@ -231,8 +292,15 @@ export class IsrEngine {
       return;
     }
 
+    // Mark as revalidating to prevent duplicate background jobs on concurrent stale requests
+    if (this.config.cache.setState) {
+      await this.config.cache.setState(cacheKey, 'revalidating');
+    } else {
+      await this.config.cache.set(cacheKey, { ...staleEntry, state: 'revalidating' });
+    }
+
     const job: Omit<RevalidationJob, 'attempt' | 'enqueuedAt'> = {
-      cacheKey: this.buildCacheKey(null, tenantId, path),
+      cacheKey,
       tenantId,
       path,
       renderFn: this.config.revalidation.renderFnFactory(tenantId, path),
@@ -261,7 +329,7 @@ export class IsrEngine {
     }
   }
 
-  buildCacheKey(req: unknown, tenantId: string, path: string): string {
+  private buildCacheKey(req: unknown, tenantId: string, path: string): string {
     if (this.config.cacheKeyResolver) {
       return this.config.cacheKeyResolver(req, tenantId, this.cacheVersion, path);
     }
@@ -272,6 +340,32 @@ export class IsrEngine {
     if (!this.config.routes?.length) return undefined;
     const normalizedPath = normalizePath(path);
     return this.config.routes.find((r) => matchPath(normalizePath(r.path), normalizedPath));
+  }
+
+  /**
+   * Injects ISR metadata into the rendered HTML so Angular's TransferState
+   * can pass it to IsrService on the client.
+   */
+  private injectIsrTransferState(html: string, state: IsrTransferState): string {
+    const stateJson = JSON.stringify(state);
+    const key = ANGULAR_ISR_TRANSFER_KEY;
+
+    // Try to merge into Angular's existing ng-state <script> tag (preferred)
+    const ngStateRegex = /(<script id="ng-state"[^>]*>)(\{.*?\})(<\/script>)/s;
+    const match = html.match(ngStateRegex);
+    if (match) {
+      try {
+        const existing = JSON.parse(match[2]);
+        const merged = { ...existing, [key]: state };
+        return html.replace(ngStateRegex, `$1${JSON.stringify(merged)}$3`);
+      } catch {
+        // JSON parse failed — fall through to standalone injection
+      }
+    }
+
+    // Inject as a separate script tag before </body>
+    const script = `<script id="ng-isr-state" type="application/json">{"${key}":${stateJson}}</script>`;
+    return html.replace('</body>', `${script}</body>`);
   }
 
   private emit(event: IsrEvent): void {
@@ -295,7 +389,7 @@ function matchPath(pattern: string, path: string): boolean {
   // Convert glob to regex: ** matches anything, * matches path segment
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*/g, '.+')
+    .replace(/\*\*/g, '.*') // '.*' matches zero or more chars; '/blog/**' now matches '/blog'
     .replace(/\*/g, '[^/]+');
 
   return new RegExp(`^${escaped}$`).test(path);

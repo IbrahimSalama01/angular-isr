@@ -9,16 +9,21 @@ interface StoredEntry {
  * Built-in in-memory cache adapter.
  *
  * Suitable for single-instance deployments and local development.
- * For distributed/multi-instance deployments, implement a Redis-backed CacheAdapter.
  *
- * State computation on get():
- * - fresh:       age < ttl
- * - stale:       ttl <= age < (ttl + staleTtl)
- * - error:       stored with state='error'
- * - null:        staleTtl exceeded (treat as miss), version mismatch, or not found
+ * ⚠️ Production note: For distributed/multi-instance deployments (load-balanced
+ * servers), implement a Redis-backed CacheAdapter instead. This adapter stores
+ * state in-process and does not share state across instances.
+ *
+ * @param options.maxSize - Maximum number of cache entries. When exceeded, the oldest
+ * entry is evicted (FIFO, since Map preserves insertion order). Default: no limit.
  */
 export class MemoryCacheAdapter implements CacheAdapter {
   private readonly store = new Map<string, StoredEntry>();
+  private readonly maxSize: number;
+
+  constructor(options?: { maxSize?: number }) {
+    this.maxSize = options?.maxSize ?? Infinity;
+  }
 
   async get(key: string): Promise<CacheEntry | null> {
     const stored = this.store.get(key);
@@ -55,6 +60,13 @@ export class MemoryCacheAdapter implements CacheAdapter {
   }
 
   async set(key: string, entry: CacheEntry): Promise<void> {
+    // Evict oldest entry if at capacity (and this is a new key, not an update)
+    if (this.maxSize !== Infinity && this.store.size >= this.maxSize && !this.store.has(key)) {
+      const firstKey = this.store.keys().next().value;
+      if (firstKey !== undefined) {
+        this.store.delete(firstKey);
+      }
+    }
     this.store.set(key, { entry: { ...entry }, storedAt: Date.now() });
   }
 
@@ -64,8 +76,10 @@ export class MemoryCacheAdapter implements CacheAdapter {
 
   async deleteByTag(tenantId: string, tag: string): Promise<string[]> {
     const deleted: string[] = [];
+    // Note: It is safe to delete from a Map while iterating over it in JS.
+    // The iterator will continue correctly.
     for (const [key, { entry }] of this.store.entries()) {
-      if (entry.tenantId === tenantId && entry.tags.includes(tag)) {
+      if ((tenantId === '__all__' || entry.tenantId === tenantId) && entry.tags.includes(tag)) {
         this.store.delete(key);
         deleted.push(key);
       }
@@ -76,7 +90,7 @@ export class MemoryCacheAdapter implements CacheAdapter {
   async deleteByTenant(tenantId: string): Promise<string[]> {
     const deleted: string[] = [];
     for (const [key, { entry }] of this.store.entries()) {
-      if (entry.tenantId === tenantId) {
+      if (tenantId === '__all__' || entry.tenantId === tenantId) {
         this.store.delete(key);
         deleted.push(key);
       }
@@ -84,7 +98,18 @@ export class MemoryCacheAdapter implements CacheAdapter {
     return deleted;
   }
 
-  /** Update state of an existing entry without replacing it */
+  async deleteByPath(tenantId: string, path: string): Promise<string[]> {
+    const deleted: string[] = [];
+    for (const [key, { entry }] of this.store.entries()) {
+      if ((tenantId === '__all__' || entry.tenantId === tenantId) && entry.path === path) {
+        this.store.delete(key);
+        deleted.push(key);
+      }
+    }
+    return deleted;
+  }
+
+  /** Satisfies the optional CacheAdapter.setState() interface method */
   async setState(key: string, state: CacheState): Promise<void> {
     const stored = this.store.get(key);
     if (stored) {

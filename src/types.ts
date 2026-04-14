@@ -1,7 +1,7 @@
 /**
  * Represents the lifecycle state of a cached page entry.
  */
-export type CacheState = 'fresh' | 'stale' | 'revalidating' | 'error';
+export type CacheState = 'fresh' | 'stale' | 'revalidating' | 'error' | 'miss';
 
 /**
  * A cached page entry stored in the cache adapter.
@@ -40,6 +40,16 @@ export interface CacheAdapter {
   delete(key: string): Promise<void>;
   deleteByTag(tenantId: string, tag: string): Promise<string[]>;
   deleteByTenant(tenantId: string): Promise<string[]>;
+  /**
+   * Delete entries by path for a specific tenant.
+   * If tenantId is '__all__', delete across all tenants.
+   */
+  deleteByPath?(tenantId: string, path: string): Promise<string[]>;
+  /**
+   * Atomically update the state of an existing entry without replacing the full entry.
+   * Optional — implement for efficiency. Falls back to get()+set() in the engine if absent.
+   */
+  setState?(key: string, state: CacheState): Promise<void>;
 }
 
 /**
@@ -243,3 +253,14 @@ export interface IsrClientConfig {
 
 /** Transfer state key for ISR metadata injected by the server engine */
 export const ANGULAR_ISR_TRANSFER_KEY = 'ANGULAR_ISR_STATE';
+
+/**
+ * ISR metadata written into Angular TransferState by the server engine
+ * and read by IsrService on the client.
+ */
+export interface IsrTransferState {
+  cacheState: CacheState;
+  ttl: number | null;
+  tenant: string | null;
+  tags: string[];
+}
