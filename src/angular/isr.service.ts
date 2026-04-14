@@ -1,19 +1,12 @@
 import { computed, PLATFORM_ID, signal, TransferState, makeStateKey } from '@angular/core';
 import { isPlatformBrowser } from '@angular/common';
 import { ANGULAR_ISR_TRANSFER_KEY } from '../types.js';
-import type { CacheState } from '../types.js';
-
-export interface IsrTransferState {
-  cacheState: CacheState;
-  ttl: number | null;
-  tenant: string | null;
-  tags: string[];
-}
+import type { IsrTransferState } from '../types.js';
 
 const ISR_STATE_KEY = makeStateKey<IsrTransferState>(ANGULAR_ISR_TRANSFER_KEY);
 
 const DEFAULT_STATE: IsrTransferState = {
-  cacheState: 'miss' as unknown as CacheState,
+  cacheState: 'miss',
   ttl: null,
   tenant: null,
   tags: [],
@@ -52,11 +45,23 @@ export class IsrService {
   private readTransferState(): IsrTransferState {
     if (isPlatformBrowser(this.platformId)) {
       try {
-        const stored = this.transferState.get(ISR_STATE_KEY, DEFAULT_STATE);
-        this.transferState.remove(ISR_STATE_KEY);
-        return stored;
-      } catch {
-        return DEFAULT_STATE;
+        // 1. Try Angular's TransferState (standard)
+        if (this.transferState.hasKey(ISR_STATE_KEY)) {
+          const stored = this.transferState.get(ISR_STATE_KEY, DEFAULT_STATE);
+          this.transferState.remove(ISR_STATE_KEY);
+          return stored;
+        }
+
+        // 2. Fallback: Read from the standalone script tag injected by the engine
+        // when it couldn't merge into ng-state.
+        const script = document.getElementById('ng-isr-state');
+        if (script?.textContent) {
+          const raw = JSON.parse(script.textContent);
+          const state = raw[ANGULAR_ISR_TRANSFER_KEY];
+          if (state) return state;
+        }
+      } catch (err) {
+        // Fall through to default
       }
     }
     // On server: return default — server writes this via the engine
