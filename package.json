@@ -2,7 +2,15 @@
   "name": "angular-isr",
   "version": "0.1.0",
   "description": "Incremental Static Regeneration (ISR) for Angular SSR applications with multitenancy, CMS webhooks, and hybrid rendering",
+  "author": "Ibrahim Salama <ibrahimSalama100@outlook.com>",
+  "repository": { "type": "git", "url": "https://github.com/IbrahimSalama01/angular-isr.git" },
+  "homepage": "https://github.com/IbrahimSalama01/angular-isr#readme",
+  "keywords": ["angular", "ssr", "isr", "incremental-static-regeneration", "caching", "angular-ssr"],
+  "bugs":{
+    "url": "https://github.com/IbrahimSalama01/angular-isr/issues"
+  },
   "license": "MIT",
+  "engines": { "node": ">=18" },
   "type": "module",
   "exports": {
     ".": {
@@ -33,24 +41,28 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "peerDependencies": {
+    "@angular/common": ">=17",
     "@angular/core": ">=17",
     "@angular/platform-browser": ">=17",
     "@angular/ssr": ">=17",
     "express": "^4 || ^5"
   },
   "peerDependenciesMeta": {
+    "@angular/common": { "optional": false },
     "@angular/core": { "optional": false },
     "@angular/platform-browser": { "optional": false },
     "@angular/ssr": { "optional": true },
     "express": { "optional": true }
   },
   "devDependencies": {
-    "@angular/core": "^21.2.0",
-    "@angular/platform-browser": "^21.2.0",
-    "@angular/ssr": "^21.2.6",
-    "@types/express": "^5.0.1",
-    "@types/node": "^20.17.19",
+    "@angular/core": "^17.3.0",
+    "@angular/common": "^17.3.0",
+    "@angular/platform-browser": "^17.3.0",
+    "@angular/platform-server": "^17.3.0",
+    "@angular/ssr": "^17.3.0",
+    "@types/express": "^4.17.21",
+    "@types/node": "^18.19.0",
     "tsup": "^8.3.5",
-    "typescript": "~5.9.2"
+    "typescript": "~5.4.0"
   }
 }

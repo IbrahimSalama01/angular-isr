@@ -70,3 +70,5 @@ storybook-static/
 
 # ESLint cache
 .eslintcache
+verify-tasks.ts
+verify_glob.ts
