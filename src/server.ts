@@ -5,8 +5,12 @@
  * Do NOT import this in Angular components — it contains Node.js-only APIs.
  */
 
+// Angular providers (server-only)
+export { provideIsrServer } from './angular/isr.provider.server.js';
+
 // Core engine
 export { IsrEngine } from './core/isr-engine.js';
+export { isrAsyncContext } from './core/isr-context.js';
 
 // Cache
 export { MemoryCacheAdapter } from './cache/memory-cache-adapter.js';

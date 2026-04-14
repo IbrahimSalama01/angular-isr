@@ -1,5 +1,7 @@
 import type { Request, RequestHandler, Response, NextFunction } from 'express';
 import { IsrEngine } from '../../core/isr-engine.js';
+import { isrAsyncContext } from '../../core/isr-context.js';
+import { createMockResponse } from './mock-response.js';
 import type { IsrFetchFn, IsrRouteConfig } from '../../types.js';
 
 export interface IsrMiddlewareOptions {
@@ -12,7 +14,15 @@ export interface IsrMiddlewareOptions {
 }
 
 /**
+ * Static asset file extension pattern — these requests bypass ISR entirely.
+ */
+const STATIC_EXT_RE = /\.(?:js|mjs|cjs|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|webp|avif|map|json|xml|txt|pdf)$/i;
+
+/**
  * Creates an Express middleware that wraps the ISR engine.
+ *
+ * Only intercepts navigational HTML requests (GET/HEAD that accept text/html
+ * and do not resolve to a static asset). All other requests are passed to next().
  *
  * Usage in server.ts:
  * ```ts
@@ -25,6 +35,11 @@ export function createIsrMiddleware(options: IsrMiddlewareOptions): RequestHandl
   const { engine, angularHandler } = options;
 
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    // Only intercept navigational HTML requests
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    if (STATIC_EXT_RE.test(req.path)) return next();
+    if (!req.accepts('html')) return next();
+
     const path = req.path;
 
     try {
@@ -52,87 +67,34 @@ function sendCachedResponse(res: Response, html: string, routeConfig?: IsrRouteC
 
 /**
  * Creates a renderFn that drives Angular SSR via the Express handler.
- * Captures the HTML response from the Angular handler.
+ * Wraps the handler in an AsyncLocalStorage context so isrFetch is available
+ * anywhere in the Angular DI tree during SSR (via inject(ISR_FETCH)).
  */
 function createRenderFn(
   angularHandler: RequestHandler,
   originalReq: Request,
 ): (isrFetch: IsrFetchFn) => Promise<string> {
-  return (_isrFetch: IsrFetchFn) =>
-    new Promise<string>((resolve, reject) => {
-      const chunks: Buffer[] = [];
-      const headers: Record<string, string> = {};
+  return (isrFetch: IsrFetchFn): Promise<string> => {
+    const { mockRes, getHtml, rejectHtml } = createMockResponse();
 
-      // Create a mock response to capture Angular's output
-      const mockRes: any = {
-        statusCode: 200,
-        status(code: number) {
-          this.statusCode = code;
-          return this;
-        },
-        setHeader(name: string, value: string) {
-          headers[name.toLowerCase()] = value;
-          return this;
-        },
-        getHeader(name: string) {
-          return headers[name.toLowerCase()];
-        },
-        removeHeader(name: string) {
-          delete headers[name.toLowerCase()];
-          return this;
-        },
-        write(chunk: Buffer | string) {
-          if (typeof chunk === 'string') {
-            chunks.push(Buffer.from(chunk));
-          } else {
-            chunks.push(chunk);
-          }
-          return true;
-        },
-        end(chunk?: Buffer | string) {
-          if (chunk) {
-            if (typeof chunk === 'string') {
-              chunks.push(Buffer.from(chunk));
-            } else {
-              chunks.push(chunk);
-            }
-          }
-          resolve(Buffer.concat(chunks).toString('utf8'));
-          return this;
-        },
-        send(body: any) {
-          if (typeof body === 'string') {
-            this.write(body);
-          } else if (Buffer.isBuffer(body)) {
-            this.write(body);
-          } else {
-            this.json(body);
-            return this;
-          }
-          this.end();
-          return this;
-        },
-        json(obj: any) {
-          this.setHeader('Content-Type', 'application/json');
-          this.write(JSON.stringify(obj));
-          this.end();
-          return this;
-        },
-        on() { return this; },
-        once() { return this; },
-        emit() { return false; },
-      };
-
+    // Run the Angular handler inside the ISR async context so inject(ISR_FETCH) works
+    isrAsyncContext.run({ isrFetch }, () => {
       try {
         const result = angularHandler(originalReq, mockRes as Response, (err?: unknown) => {
-          if (err) reject(err instanceof Error ? err : new Error(String(err)));
-          else reject(new Error('Angular handler passed to next() — no response captured'));
+          // If Angular calls next() it means it didn't handle the request — always an error here
+          const error = err instanceof Error ? err : new Error(
+            err ? String(err) : 'Angular handler called next() — no response captured',
+          );
+          rejectHtml(error);
         });
         if (result instanceof Promise) {
-          result.catch(reject);
+          result.catch((err) => rejectHtml(err instanceof Error ? err : new Error(String(err))));
         }
       } catch (error) {
-        reject(error);
+        rejectHtml(error instanceof Error ? error : new Error(String(error)));
       }
     });
+
+    return getHtml();
+  };
 }

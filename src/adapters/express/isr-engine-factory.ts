@@ -1,5 +1,8 @@
 import type { RequestHandler } from 'express';
 import { IsrEngine } from '../../core/isr-engine.js';
+import { isrAsyncContext } from '../../core/isr-context.js';
+import { createMockResponse } from './mock-response.js';
+import { createMockRequest } from './mock-request.js';
 import type { IsrEngineConfig } from '../../types.js';
 
 export interface IsrEngineFactoryOptions extends Omit<IsrEngineConfig, 'revalidation'> {
@@ -44,80 +47,26 @@ export function createIsrEngine(options: IsrEngineFactoryOptions): IsrEngine {
     ? ({
         ...revalidation,
         renderFnFactory: (_tenantId: string, _path: string) => {
-          // For background revalidation, we create a mock request
-          // The actual request context is reconstructed by the engine
           return (isrFetch) =>
             new Promise<string>((resolve, reject) => {
-              const chunks: Buffer[] = [];
+              const { mockRes, getHtml } = createMockResponse();
+              const mockReq = createMockRequest(_path);
 
-              const mockReq = {
-                path: _path,
-                method: 'GET',
-                headers: {},
-                // Add minimal request properties needed by Angular SSR
-              } as unknown as Parameters<RequestHandler>[0];
-
-              const mockRes: any = {
-                statusCode: 200,
-                status(code: number) {
-                  this.statusCode = code;
-                  return this;
-                },
-                setHeader() { return this; },
-                getHeader() { return undefined; },
-                removeHeader() { return this; },
-                write(chunk: Buffer | string) {
-                  if (typeof chunk === 'string') {
-                    chunks.push(Buffer.from(chunk));
-                  } else {
-                    chunks.push(chunk);
+              isrAsyncContext.run({ isrFetch }, () => {
+                try {
+                  const result = angularHandler(mockReq, mockRes as Parameters<RequestHandler>[1], (err?: unknown) => {
+                    if (err) reject(err instanceof Error ? err : new Error(String(err)));
+                    else reject(new Error('Angular handler passed to next() — no response captured'));
+                  });
+                  if (result instanceof Promise) {
+                    result.catch(reject);
                   }
-                  return true;
-                },
-                end(chunk?: Buffer | string) {
-                  if (chunk) {
-                    if (typeof chunk === 'string') {
-                      chunks.push(Buffer.from(chunk));
-                    } else {
-                      chunks.push(chunk);
-                    }
-                  }
-                  resolve(Buffer.concat(chunks).toString('utf8'));
-                  return this;
-                },
-                send(body: any) {
-                  if (typeof body === 'string') {
-                    this.write(body);
-                  } else if (Buffer.isBuffer(body)) {
-                    this.write(body);
-                  } else {
-                    this.json(body);
-                    return this;
-                  }
-                  this.end();
-                  return this;
-                },
-                json(obj: any) {
-                  this.write(JSON.stringify(obj));
-                  this.end();
-                  return this;
-                },
-                on() { return this; },
-                once() { return this; },
-                emit() { return false; },
-              };
-
-              try {
-                const result = angularHandler(mockReq, mockRes as Parameters<RequestHandler>[1], (err?: unknown) => {
-                  if (err) reject(err instanceof Error ? err : new Error(String(err)));
-                  else reject(new Error('Angular handler passed to next() — no response captured'));
-                });
-                if (result instanceof Promise) {
-                  result.catch(reject);
+                } catch (error) {
+                  reject(error);
                 }
-              } catch (error) {
-                reject(error);
-              }
+              });
+
+              getHtml().then(resolve).catch(reject);
             });
         },
       } as IsrEngineConfig['revalidation'])

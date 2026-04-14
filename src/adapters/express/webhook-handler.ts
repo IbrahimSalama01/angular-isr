@@ -4,10 +4,20 @@ import { RateLimiter } from '../../webhook/rate-limiter.js';
 import { verifySecret } from '../../webhook/secret-auth.js';
 import { WebhookDebouncer } from '../../webhook/webhook-debouncer.js';
 import type { CacheAdapter, IsrEvent, WebhookPayload } from '../../types.js';
-import { normalizePath } from '../../core/cache-key.js';
+import { IsrEngine } from '../../core/isr-engine.js';
 
 export interface WebhookHandlerOptions {
-  cacheAdapter: CacheAdapter;
+  /**
+   * The ISR engine instance. Use this instead of cacheAdapter for correct
+   * path-based invalidation (engine builds cache keys correctly).
+   */
+  engine?: IsrEngine;
+  /**
+   * @deprecated Use `engine` instead. Path-based invalidation via cacheAdapter
+   * will not work correctly because it bypasses cache key construction.
+   * Tag-based and tenant-based invalidation still work.
+   */
+  cacheAdapter?: CacheAdapter;
   secret: string;
   /** Max requests per minute per IP. Default: 60 */
   rateLimitPerMinute?: number;
@@ -25,7 +35,7 @@ export interface WebhookHandlerOptions {
  * ```ts
  * import { createWebhookHandler } from 'angular-isr/adapters/express';
  *
- * app.post('/_isr/revalidate', createWebhookHandler({ cacheAdapter, secret: process.env.ISR_SECRET! }));
+ * app.post('/_isr/revalidate', createWebhookHandler({ engine, secret: process.env.ISR_SECRET! }));
  * ```
  *
  * The webhook accepts POST requests with JSON body:
@@ -39,6 +49,7 @@ export interface WebhookHandlerOptions {
  */
 export function createWebhookHandler(options: WebhookHandlerOptions): RequestHandler {
   const {
+    engine,
     cacheAdapter,
     secret,
     rateLimitPerMinute = 60,
@@ -78,14 +89,14 @@ export function createWebhookHandler(options: WebhookHandlerOptions): RequestHan
     // 4. Parse body
     const body = req.body as WebhookPayload;
     const payload: WebhookPayload = {
-      paths: Array.isArray(body?.paths) ? body.paths.map(normalizePath) : undefined,
+      paths: Array.isArray(body?.paths) ? body.paths : undefined,
       tags: Array.isArray(body?.tags) ? body.tags : undefined,
       tenant: typeof body?.tenant === 'string' ? body.tenant : undefined,
     };
 
     // 5. Debounce + process
     debouncer.debounce(payload, async (merged) => {
-      const result = await processInvalidation(merged, cacheAdapter, preRender, onEvent);
+      const result = await processInvalidation(merged, engine, cacheAdapter, preRender, onEvent);
       // Note: response is already sent at this point — this runs in background
       void result;
     });
@@ -102,7 +113,8 @@ export function createWebhookHandler(options: WebhookHandlerOptions): RequestHan
 
 async function processInvalidation(
   payload: WebhookPayload,
-  cacheAdapter: CacheAdapter,
+  engine: IsrEngine | undefined,
+  cacheAdapter: CacheAdapter | undefined,
   preRender?: (tenantId: string, paths: string[]) => Promise<void>,
   onEvent?: (event: IsrEvent) => void,
 ): Promise<{ revalidated: string[]; errors: string[] }> {
@@ -111,37 +123,43 @@ async function processInvalidation(
   const tenantId = payload.tenant ?? '';
 
   try {
-    // Path-based invalidation
-    if (payload.paths?.length) {
-      for (const path of payload.paths) {
-        try {
-          await cacheAdapter.delete(path);
-          revalidated.push(path);
-        } catch (err) {
-          errors.push(`path:${path}:${String(err)}`);
+    if (engine) {
+      // Preferred path: engine handles key construction correctly
+      const invalidated = await engine.invalidate({
+        tenantId,
+        paths: payload.paths,
+        tags: payload.tags,
+      });
+      revalidated.push(...invalidated);
+    } else if (cacheAdapter) {
+      // Legacy path: direct cache adapter (path invalidation may not work for custom key formats)
+      if (payload.paths?.length) {
+        for (const path of payload.paths) {
+          try {
+            await cacheAdapter.delete(path);
+            revalidated.push(path);
+          } catch (err) {
+            errors.push(`path:${path}:${String(err)}`);
+          }
         }
       }
-    }
-
-    // Tag-based invalidation
-    if (payload.tags?.length) {
-      for (const tag of payload.tags) {
+      if (payload.tags?.length) {
+        for (const tag of payload.tags) {
+          try {
+            const deleted = await cacheAdapter.deleteByTag(tenantId, tag);
+            revalidated.push(...deleted);
+          } catch (err) {
+            errors.push(`tag:${tag}:${String(err)}`);
+          }
+        }
+      }
+      if (!payload.paths?.length && !payload.tags?.length && tenantId) {
         try {
-          const deleted = await cacheAdapter.deleteByTag(tenantId, tag);
+          const deleted = await cacheAdapter.deleteByTenant(tenantId);
           revalidated.push(...deleted);
         } catch (err) {
-          errors.push(`tag:${tag}:${String(err)}`);
+          errors.push(`tenant:${tenantId}:${String(err)}`);
         }
-      }
-    }
-
-    // Tenant-only invalidation
-    if (!payload.paths?.length && !payload.tags?.length && tenantId) {
-      try {
-        const deleted = await cacheAdapter.deleteByTenant(tenantId);
-        revalidated.push(...deleted);
-      } catch (err) {
-        errors.push(`tenant:${tenantId}:${String(err)}`);
       }
     }
 
