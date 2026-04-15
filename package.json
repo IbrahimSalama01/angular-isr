@@ -1,16 +1,28 @@
 {
   "name": "angular-isr",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Incremental Static Regeneration (ISR) for Angular SSR applications with multitenancy, CMS webhooks, and hybrid rendering",
   "author": "Ibrahim Salama <ibrahimSalama100@outlook.com>",
-  "repository": { "type": "git", "url": "https://github.com/IbrahimSalama01/angular-isr.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/IbrahimSalama01/angular-isr.git"
+  },
   "homepage": "https://github.com/IbrahimSalama01/angular-isr#readme",
-  "keywords": ["angular", "ssr", "isr", "incremental-static-regeneration", "caching", "angular-ssr"],
-  "bugs":{
+  "keywords": [
+    "angular",
+    "ssr",
+    "isr",
+    "incremental-static-regeneration",
+    "caching",
+    "angular-ssr"
+  ],
+  "bugs": {
     "url": "https://github.com/IbrahimSalama01/angular-isr/issues"
   },
   "license": "MIT",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "type": "module",
   "exports": {
     ".": {
@@ -34,8 +46,12 @@
   "types": "./dist/index.d.ts",
   "typesVersions": {
     "*": {
-      "server": ["./dist/server.d.ts"],
-      "adapters/express": ["./dist/adapters/express.d.ts"]
+      "server": [
+        "./dist/server.d.ts"
+      ],
+      "adapters/express": [
+        "./dist/adapters/express.d.ts"
+      ]
     }
   },
   "files": [
@@ -54,11 +70,21 @@
     "express": "^4 || ^5"
   },
   "peerDependenciesMeta": {
-    "@angular/common": { "optional": false },
-    "@angular/core": { "optional": false },
-    "@angular/platform-browser": { "optional": false },
-    "@angular/ssr": { "optional": true },
-    "express": { "optional": true }
+    "@angular/common": {
+      "optional": false
+    },
+    "@angular/core": {
+      "optional": false
+    },
+    "@angular/platform-browser": {
+      "optional": false
+    },
+    "@angular/ssr": {
+      "optional": true
+    },
+    "express": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@angular/core": "^17.3.0",
