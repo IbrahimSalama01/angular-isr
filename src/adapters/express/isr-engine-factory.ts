@@ -3,7 +3,7 @@ import { IsrEngine } from '../../core/isr-engine.js';
 import { isrAsyncContext } from '../../core/isr-context.js';
 import { createMockResponse } from './mock-response.js';
 import { createMockRequest } from './mock-request.js';
-import type { IsrEngineConfig } from '../../types.js';
+import type { IsrEngineConfig, IsrFetchFn } from '../../types.js';
 
 export interface IsrEngineFactoryOptions extends Omit<IsrEngineConfig, 'revalidation'> {
   /**
@@ -42,36 +42,42 @@ export interface IsrEngineFactoryOptions extends Omit<IsrEngineConfig, 'revalida
 export function createIsrEngine(options: IsrEngineFactoryOptions): IsrEngine {
   const { angularHandler, revalidation, ...engineConfig } = options;
 
-  // Create the renderFnFactory for background revalidation
-  const finalRevalidation: IsrEngineConfig['revalidation'] = revalidation
-    ? ({
-        ...revalidation,
-        renderFnFactory: (_tenantId: string, _path: string) => {
-          return (isrFetch) =>
-            new Promise<string>((resolve, reject) => {
-              const { mockRes, getHtml } = createMockResponse();
-              const mockReq = createMockRequest(_path);
+  // 1. Create the Express-specific render function factory.
+  // This factory handles background revalidation using the provided Angular handler.
+  const expressRenderFnFactory = (_tenantId: string, _path: string) => {
+    return (isrFetch: IsrFetchFn) =>
+      new Promise<string>((resolve, reject) => {
+        const { mockRes, getHtml } = createMockResponse();
+        const mockReq = createMockRequest(_path);
 
-              isrAsyncContext.run({ isrFetch }, () => {
-                try {
-                  const result = angularHandler(mockReq, mockRes as Parameters<RequestHandler>[1], (err?: unknown) => {
-                    if (err) reject(err instanceof Error ? err : new Error(String(err)));
-                    else reject(new Error('Angular handler passed to next() — no response captured'));
-                  });
-                  const promiseResult = result as unknown as Promise<void> | undefined;
-                  if (promiseResult) {
-                    promiseResult.catch(reject);
-                  }
-                } catch (error) {
-                  reject(error);
-                }
-              });
-
-              getHtml().then(resolve).catch(reject);
+        isrAsyncContext.run({ isrFetch }, () => {
+          try {
+            const result = angularHandler(mockReq, mockRes as Parameters<RequestHandler>[1], (err?: unknown) => {
+              if (err) reject(err instanceof Error ? err : new Error(String(err)));
+              else reject(new Error('Angular handler passed to next() — no response captured'));
             });
-        },
-      } as IsrEngineConfig['revalidation'])
-    : undefined;
+
+            // Handle async handlers (if any)
+            const promiseResult = result as unknown as Promise<void> | undefined;
+            if (promiseResult?.catch) {
+              promiseResult.catch(reject);
+            }
+          } catch (error) {
+            reject(error);
+          }
+        });
+
+        getHtml().then(resolve).catch(reject);
+      });
+  };
+
+  // 2. Build the final revalidation config.
+  // We ALWAYS provide the renderFnFactory if an angularHandler is available,
+  // enabling background revalidation even if webhooks are not configured.
+  const finalRevalidation: IsrEngineConfig['revalidation'] = {
+    ...revalidation,
+    renderFnFactory: expressRenderFnFactory,
+  } as IsrEngineConfig['revalidation'];
 
   return new IsrEngine({
     ...engineConfig,
